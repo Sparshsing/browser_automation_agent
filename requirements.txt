@@ -1,0 +1,9 @@
+google-genai
+python-dotenv
+playwright
+Pillow
+pydantic
+validators
+beautifulsoup4
+asyncio
+crawl4ai
