@@ -5,6 +5,8 @@ import base64
 import logging
 import asyncio
 import validators
+import time
+from collections import defaultdict
 from PIL import Image
 from bs4 import BeautifulSoup
 from playwright.async_api import Page, Browser
@@ -101,59 +103,104 @@ def get_trimmed_chat_history(history):
             trimmed_chat_history.append(content.model_copy())
     return trimmed_chat_history
 
-def call_gemini_chat(chat, content):
+# Track request timestamps for rate limiting
+_request_timestamps = defaultdict(list)
+
+def call_gemini_chat(chat, content, rate_limits=None, max_retries=2):
     """
-    Call the chat with given content and log metrics, including any tool calls
+    Call the chat with given content and log metrics, including any tool calls.
+    Respects rate limits and includes retry logic.
     
     Args:
         chat: The chat instance to use
         content: The content/prompt to send
+        rate_limits: Dictionary mapping model names to requests per minute limits
+        max_retries: Maximum number of retry attempts on error (default: 2)
     
     Returns:
         The chat response
     """
-    response = chat.send_message(content)
+    global _request_timestamps
     
-    # Extract metrics
-    usage = response.usage_metadata
-    prompt_tokens = usage.prompt_token_count
-    output_tokens = usage.candidates_token_count
-    total_tokens = prompt_tokens + output_tokens
+    # Get model name from the chat
+    model_name = getattr(chat, '_model', 'default')
     
-    # Get prompt and response text
-    if hasattr(response, 'text'):
-        output_text = response.text
-    else:
-        output_text = str(response)
+    # Rate limiting logic
+    if rate_limits and model_name in rate_limits:
+        rpm_limit = rate_limits[model_name]
+        current_time = time.time()
+        
+        # Remove timestamps older than 60 seconds
+        _request_timestamps[model_name] = [ts for ts in _request_timestamps[model_name] 
+                                          if current_time - ts < 60]
+        
+        # Check if we're over the limit
+        if len(_request_timestamps[model_name]) >= rpm_limit:
+            # Calculate wait time until we can make another request
+            oldest_timestamp = min(_request_timestamps[model_name])
+            wait_time = 60 - (current_time - oldest_timestamp)
+            if wait_time > 0:
+                logger.info(f"Rate limit reached for {model_name}. Waiting {wait_time:.2f} seconds")
+                time.sleep(wait_time)
     
-    # Check for tool calls
-    tool_call_info = None
-    tool_call_tokens = 0
+    # Record this request timestamp
+    _request_timestamps[model_name].append(time.time())
     
-    if hasattr(response, 'function_calls') and response.function_calls:
-        tool_call_info = []
-        for function_call in response.function_calls:
-            tool_call_info.append({
-                'name': function_call.name,
-                'args': dict(function_call.args)
-            })
+    # Retry logic
+    retry_count = 0
+    while retry_count <= max_retries:
+        try:
+            response = chat.send_message(content)
+            
+            # Extract metrics
+            usage = response.usage_metadata
+            prompt_tokens = usage.prompt_token_count
+            output_tokens = usage.candidates_token_count
+            total_tokens = prompt_tokens + output_tokens
+            
+            # Get prompt and response text
+            if hasattr(response, 'text'):
+                output_text = response.text
+            else:
+                output_text = str(response)
+            
+            # Check for tool calls
+            tool_call_info = None
+            tool_call_tokens = 0
+            
+            if hasattr(response, 'function_calls') and response.function_calls:
+                tool_call_info = []
+                for function_call in response.function_calls:
+                    tool_call_info.append({
+                        'name': function_call.name,
+                        'args': dict(function_call.args)
+                    })
 
-    # Prepare log data
-    log_data = {
-        'prompt_tokens': prompt_tokens,
-        'output_tokens': output_tokens,
-        'total_tokens': total_tokens,
-        'prompt': get_trimmed_content(content),
-        'response': output_text
-    }
-    
-    # Add tool call info if present
-    if tool_call_info:
-        log_data['tool_call'] = tool_call_info
-        if tool_call_tokens:
-            log_data['tool_call_tokens'] = tool_call_tokens
-    
-    # Log everything
-    llm_logger.info(log_data)
-    
-    return response 
+            # Prepare log data
+            log_data = {
+                'prompt_tokens': prompt_tokens,
+                'output_tokens': output_tokens,
+                'total_tokens': total_tokens,
+                'prompt': get_trimmed_content(content),
+                'response': output_text
+            }
+            
+            # Add tool call info if present
+            if tool_call_info:
+                log_data['tool_call'] = tool_call_info
+                if tool_call_tokens:
+                    log_data['tool_call_tokens'] = tool_call_tokens
+            
+            # Log everything
+            llm_logger.info(log_data)
+            
+            return response
+            
+        except Exception as e:
+            retry_count += 1
+            if retry_count <= max_retries:
+                logger.warning(f"Error calling Gemini API: {str(e)}. Retrying ({retry_count}/{max_retries})...")
+                time.sleep(60)  # Wait a second before retrying
+            else:
+                logger.error(f"Failed to call Gemini API after {max_retries} retries: {str(e)}")
+                raise 

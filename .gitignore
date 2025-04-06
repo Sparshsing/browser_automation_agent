@@ -29,3 +29,5 @@ logs/
 # PyCharm
 .idea/
 
+temp_code/
+
