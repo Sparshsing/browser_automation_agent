@@ -8,4 +8,8 @@ class Step(BaseModel):
 class VerificationResult(BaseModel):
     success: bool
     message: Optional[str] = None
-    new_goal: Optional[str] = None 
+    new_goal: Optional[str] = None
+
+class CheckSuccess(BaseModel):
+    is_success: bool
+    message: Optional[str] = None

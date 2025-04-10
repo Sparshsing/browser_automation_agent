@@ -68,8 +68,8 @@ def plan_user_query(client, user_query):
             return None
         
         logger.info(f"Planned {len(steps)} steps for query: {user_query}")
-        for step in steps:
-            logger.info(f"Step {step.step_id}: {step.goal}")
+        # for step in steps:
+        #     logger.info(f"Step {step.step_id}: {step.goal}")
             
         return steps
     

@@ -5,9 +5,11 @@ import validators
 import config
 from models import VerificationResult
 from utils import (
-    call_gemini_chat, get_page_screenshot, get_simplified_dom,
+    call_gemini_chat, get_page_screenshot,
     create_custom_logger
 )
+
+from dom_utils import get_simplified_dom, get_interactive_dom, get_full_dom_with_shadow
 
 logfile = "logs/agent.log"
 logger = create_custom_logger(__name__, logfile)
@@ -39,7 +41,7 @@ def create_verifier_chat(client):
     return client.chats.create(model=config.VERIFIER_MODEL, config=verifier_config)
 
 
-async def verify_step_completion(client, step, active_page, step_logs, final_text, current_step_goal):
+async def verify_step_completion(client, step, active_page, step_logs, final_text, current_step_goal, simplified_dom=None):
     """
     Verifies if a step has been completed successfully
     
@@ -55,23 +57,29 @@ async def verify_step_completion(client, step, active_page, step_logs, final_tex
         A VerificationResult object
     """
     logger.info(f"Verifying step completion for step {step.step_id}: {step.goal}")
+    if step.goal != current_step_goal:
+        logger.info(f"Step goal has changed from {current_step_goal} to {step.goal}")
+        current_step_goal = step.goal
     
     # Get current page state
     current_url = active_page.url
     current_url_valid = validators.url(current_url)
-    simplified_dom = None
-    active_page_screenshot = None
+    # simplified_dom = None
+    
+    active_page_screenshot = await get_page_screenshot(active_page, full_page=False)
     
     try:
         # Get DOM and screenshot
-        if current_url_valid:
-            simplified_dom = await get_simplified_dom(active_page)
-            simplified_dom = BeautifulSoup(simplified_dom, 'html.parser').prettify()
-            active_page_screenshot = await get_page_screenshot(active_page, full_page=True)
+        if current_url_valid and simplified_dom is None:
+            # simplified_dom = await active_page.content()
+            simplified_dom = await get_full_dom_with_shadow(active_page)
+            simplified_dom = await get_interactive_dom(simplified_dom)
+            # simplified_dom = BeautifulSoup(simplified_dom, 'html.parser').prettify()
         else:
-            verifier_issue = f'Invalid URL {active_page.url}. Cannot proceed with verification'
-            verification_result = VerificationResult(success=False, message=verifier_issue, new_goal=current_step_goal)
-            return verification_result
+            pass
+            # verifier_issue = f'Invalid URL {active_page.url}. Cannot proceed with verification'
+            # verification_result = VerificationResult(success=False, message=verifier_issue, new_goal=current_step_goal)
+            # return verification_result
     except Exception as e:
         logger.exception(f"Error getting page state for verification: {e}")
         raise e
@@ -79,7 +87,7 @@ async def verify_step_completion(client, step, active_page, step_logs, final_tex
     # Prepare verification prompt
     verifier_prompt = f"""
     Current Step Goal:
-    {step.goal}
+    {current_step_goal}
 
     Current Page State:
     URL: {current_url}
@@ -92,7 +100,7 @@ async def verify_step_completion(client, step, active_page, step_logs, final_tex
     Final Text Response from Execution Agent:
     {final_text}
 
-    Please verify if the Goal has been completed, based on the screenshot, dom, url, step logs and the final text response. See if there are any errors being shown on the page.
+    Please verify if the Goal has been completed, based on the final text response, step logs, screenshot, dom, and url. See if there are any errors being shown on the page.
 
     If the goal has been completed, provide a success message.
 

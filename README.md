@@ -32,7 +32,7 @@ The agent consists of three main components:
 
 Run the main script:
 ```
-python main.py
+python interact.py
 ```
 
 Enter your natural language query when prompted. For example:
@@ -56,7 +56,7 @@ Edit `config.py` to modify the agent's behavior:
 
 ## Files
 
-- `main.py`: Entry point script
+- `interact.py`: Entry point script
 - `models.py`: Data models
 - `planner.py`: Step planning module
 - `executor.py`: Browser interaction module

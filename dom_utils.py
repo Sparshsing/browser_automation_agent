@@ -1,6 +1,11 @@
 import re
+from collections import deque
 from bs4 import BeautifulSoup, Comment, NavigableString
 import crawl4ai.content_scraping_strategy as scrapper
+from utils import create_custom_logger
+
+logfile = "logs/agent.log"
+logger = create_custom_logger(__name__, logfile)
 
 
 # --- Configuration ---
@@ -62,7 +67,7 @@ def filter_attributes(tag):
 
 import time
 # --- Main Reduction Function (Final Version) ---
-def keep_interactive_elements(html_content: str) -> str:
+def get_interactive_dom(html_content: str) -> str:
     """
     Reduces HTML by:
     1. Removing unwanted tags (script, style, meta, etc.) first.
@@ -126,11 +131,11 @@ def keep_interactive_elements(html_content: str) -> str:
 
     t2 = time.time()
     # --- Step 2: Mark ancestors of seed elements ---
-    queue = list(elements_to_process_for_ancestors)
-    processed_for_ancestors = set(queue)
+    queue = deque(elements_to_process_for_ancestors)
+    processed_for_ancestors = set(elements_to_process_for_ancestors)
 
     while queue:
-        current = queue.pop(0)
+        current = queue.popleft()
         parent = getattr(current, 'parent', None)
         if parent and getattr(parent, 'name', None) and parent.name != '[document]' and parent not in processed_for_ancestors:
             # Only mark parent if it doesn't already have a 'seed' marker
@@ -195,23 +200,90 @@ def keep_interactive_elements(html_content: str) -> str:
     # reduced_html = re.sub(r'\s{2,}', ' ', reduced_html).strip()
     t8 = time.time()
 
-    print(f"Time taken to keep interactive elements: {t1 - t0} seconds")
-    print(f"Time taken to mark initial seed elements: {t2 - t1} seconds")
-    print(f"Time taken to mark ancestors of seed elements: {t3 - t2} seconds")
-    print(f"Time taken to remove elements NOT marked: {t5 - t4} seconds")
-    print(f"Time taken to clean up remaining elements: {t6 - t5} seconds")
-    print(f"Time taken to mark all descendants of *any* marked element: {t4 - t3} seconds")
-    print(f"Time taken to final output: {t8 - t7} seconds")
+    logger.debug(f"Time taken to get interactive DOM: {t8 - t0} seconds")
+    # print(f"Time taken to mark initial seed elements: {t2 - t1} seconds")
+    # print(f"Time taken to mark ancestors of seed elements: {t3 - t2} seconds")
+    # print(f"Time taken to remove elements NOT marked: {t5 - t4} seconds")
+    # print(f"Time taken to clean up remaining elements: {t6 - t5} seconds")
+    # print(f"Time taken to mark all descendants of *any* marked element: {t4 - t3} seconds")
+    # print(f"Time taken to final output: {t8 - t7} seconds")
     return reduced_html
 
 
 
-async def get_simplified_dom(page):
+def get_simplified_dom(html: str, url: str) -> str:
     """
     Get a simplified DOM representation of the current page
     """
-    html_content = await page.content()
     scrapping_strategy = scrapper.WebScrapingStrategy()
-    scrap_result = scrapping_strategy._scrap(url=page.url, html=html_content)
+    scrap_result = scrapping_strategy._scrap(url=url, html=html)
     simplified_dom = scrap_result['cleaned_html']
     return simplified_dom
+
+
+
+async def get_shadow_dom(locator):
+    """
+    Get the shadow DOM of the element.
+
+    Args:
+        locator: The playwrightlocator of the element to get the shadow DOM of.
+        
+    Returns:
+        The shadow DOM of the element.
+    """
+    inner_html = await locator.nth(0).evaluate("""
+            element => {
+                if (element.shadowRoot && element.shadowRoot.mode === 'open') {
+                    // Element has an open shadow root, return its inner HTML
+                    return element.shadowRoot.innerHTML;
+                } else {
+                    // No open shadow root, return the element's standard inner HTML
+                    return element.innerHTML;
+                }
+            }
+        """)
+    return inner_html
+
+
+async def get_full_dom_with_shadow(page) -> str:
+    """
+    Get the full DOM with shadow DOM.
+    """
+    full_html = await page.evaluate("""
+        () => {
+            function serializeNode(node) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    const tagName = node.tagName.toLowerCase();
+                    const attrs = Array.from(node.attributes).map(attr => 
+                        `${attr.name}="${attr.value}"`
+                    ).join(" ");
+                    let openingTag = `<${tagName}${attrs ? ' ' + attrs : ''}>`;
+                    let closingTag = `</${tagName}>`;
+
+                    // Shadow root detection
+                    let shadowHtml = "";
+                    if (node.shadowRoot && node.shadowRoot.mode === "open") {
+                        const shadowContent = Array.from(node.shadowRoot.childNodes)
+                            .map(serializeNode).join("");
+                        shadowHtml = `<template shadowroot="open">${shadowContent}</template>`;
+                    }
+
+                    // Normal child nodes
+                    const childrenHtml = Array.from(node.childNodes).map(serializeNode).join("");
+
+                    return `${openingTag}${shadowHtml}${childrenHtml}${closingTag}`;
+                } else if (node.nodeType === Node.TEXT_NODE) {
+                    return node.textContent;
+                } else if (node.nodeType === Node.COMMENT_NODE) {
+                    return `<!--${node.textContent}-->`;
+                } else {
+                    return "";
+                }
+            }
+
+            return "<!DOCTYPE html>" + serializeNode(document.documentElement);
+        }
+    """)
+    return full_html
+
