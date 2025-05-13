@@ -11,7 +11,7 @@ from utils import (
     call_gemini_chat, get_trimmed_chat_history,
     create_custom_logger, get_page_screenshot
 )
-from dom_utils import get_interactive_dom, get_simplified_dom, get_full_dom_with_shadow
+from dom_utils import get_interactive_dom, get_simplified_dom, get_full_dom_with_shadow, keep_only_input_tags
 from models import CheckSuccess
 
 logfile = "logs/agent.log"
@@ -114,6 +114,22 @@ get_user_input_declaration = {
 }
 
 
+get_full_dom_declaration = {
+    "name": "get_full_dom",
+    "description": "Ask for the complete DOM of the current url",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "the reason to ask for full DOM"
+            }
+        },
+        "required": ["reason"]
+    }
+}
+
+
 display_data_declaration = {
     "name": "display_data",
     "description": "Display the result data to the user",
@@ -163,20 +179,23 @@ def create_executor_chat(client):
 
     **Process:**
     1.  You will be given a 'Step Goal' representing one part of a larger user request.
-    2.  You will receive the current page URL and a 'simplified_dom' html string representing the interactive elements currently visible on the page. You may also be provided with a screenshot of the current page.
-    3.  Analyze the 'Step Goal' and the current page state ('simplified_dom', URL, screenshot).
-    4.  Use the available tools (goto_ur, open_new_page, perform_locator_action, get_user_input) by making function calls to interact with the browser page.
+    2.  You will receive the current page URL and a 'input_elements' (consisting of only input elements) html string representing the interactive elements currently visible on the page. You may also be provided with a screenshot of the current page.
+    3.  Analyze the 'Step Goal' and the current page state ('input_elements', URL, screenshot).
+    4.  Use the available tools (goto_url, open_new_page, perform_locator_action, get_user_input, display_data_declaration, get_full_dom_declaration) by making function calls to interact with the browser page.
     5.  Ask the user for any information/confirmation needed (eg. credentials, a confirmation, etc). If asked for login, ask the user for input.
     6.  You may need to make **multiple sequential function calls** to fully achieve the 'Step Goal'. For example, you might need to 'fill' an input and then 'click' a button.
     7.  You can call multiple functions together in the same response, if they can be done on the same page and are independent of each other. eg. you can make function calls for getting username and password in the same request.
     8.  For actions like search you can make multiple function calls at once like filling the search query and then hitting enter or clicking search button. But maintain the order like first fill and then enter/click.
     9.  You can also display data to the user using the display_data tool.
     9.  **Use the 'FunctionResponse'**: If an action failed, analyze the error and try a different approach (e.g., a different selector, a different action). If an action succeeded, proceed with the next necessary action.
-    10.  **Selector Strategy**: Aim for robust selectors (IDs, unique attributes like 'data-testid' or 'name', ARIA labels, text content). Use Playwright syntax (e.g., `#password`, `input[name='username']`, `button:has-text('Log In')`). Refer to the 'simplified_dom' for available attributes and text.
+    10.  **Selector Strategy**:
+        *   If  you need to perfrom some input, utilize the 'input_elements' string to identify the input elements.
+        *   For other types of interactions, like clicking a button or link, try to locate elements using text with the help of screenshot provided. If still not found (usually timeout error in previous attempt), request the full DOM.
+        *   In case you have the full DOM available, aim for robust selectors (IDs, unique attributes like 'data-testid' or 'name', ARIA labels, text content). Use Playwright syntax (e.g., `#password`, `input[name='username']`, `button:has-text('Log In')`). Refer to the DOM for available attributes and text.
 
     11.  **Strategy for Actions *After* Interacting (e.g., Submitting a Form/Search):**
         *   After filling an input (specially for search), you often need to trigger a submission or search.
-        *   **Look Externally First:** Before assuming the submit action is *inside* the input component again, look for standard submit/search buttons *near* the input element in the DOM structure (e.g., `button:has-text("Search")`, `button[type="submit"]`, `button[aria-label*="Search"]`).
+        *   Try to locate elements using text with the help of screenshot provided. If still not found (usually timeout error in previous attempt), request the full DOM.
         *   **Consider Keyboard Actions:** A very common pattern is pressing the 'Enter' key after filling an input. Consider if using `page.press('Enter')` is the most logical next step. (You might need to add a tool or modify `perform_locator_action` to support `press`).
 
     12.  **Inference and Disambiguation:** You must *infer* the likely internal structure AND the user's intent. If multiple buttons exist near or conceptually inside a custom element, use specific text, roles, or ARIA labels in your selector to select the correct one (e.g., "Search" vs. "Clear", "Submit" vs. "Cancel").
@@ -192,6 +211,7 @@ def create_executor_chat(client):
         perform_locator_action_declaration,
         get_user_input_declaration,
         display_data_declaration,
+        get_full_dom_declaration,
         # perform_page_action_declaration  # Uncomment if needed
     ])
     
@@ -205,7 +225,7 @@ def create_executor_chat(client):
     return client.chats.create(model=config.EXECUTION_MODEL, config=executor_config)
 
 
-def create_step_prompt(step_goal, current_url, simplified_dom, function_response_parts, step_logs, action_failure, page_screenshot, verifier_message):
+def create_step_prompt(step_goal, current_url, input_elements, function_response_parts, step_logs, action_failure, page_screenshot, verifier_message):
     """
     Creates the prompt parts for executing a single step
     """
@@ -219,8 +239,9 @@ def create_step_prompt(step_goal, current_url, simplified_dom, function_response
 
         Current Page State:
         URL: {current_url}
-        Simplified DOM:
-        {simplified_dom}
+        
+        Input Elements:
+        {input_elements}
 
         ---
 
@@ -301,6 +322,16 @@ def get_user_input(query: str) -> str:
     return input(query + ' (type q to exit): ')
 
 
+async def get_full_dom(reason: str, active_page) -> str:
+    """
+    Get the complete DOM of the current url
+    """
+    full_dom_with_shadow = await get_full_dom_with_shadow(active_page)
+    simplified_dom = get_simplified_dom(full_dom_with_shadow, active_page.url)
+    # simplified_dom = get_interactive_dom(simplified_dom)
+    return simplified_dom
+
+
 def save_data(data: str, filename: str = "results.md") -> None:
     """
     Saves the data requested by the user in markdown format.
@@ -346,18 +377,22 @@ async def get_current_page_state(active_page: Page, step_logs: list) -> tuple:
         try:
             # simplified_dom = await active_page.content()
             simplified_dom = await get_full_dom_with_shadow(active_page)
+            input_elements = keep_only_input_tags(simplified_dom)
             # simplified_dom = get_simplified_dom(simplified_dom, current_url)
-            simplified_dom = get_interactive_dom(simplified_dom)
+            # simplified_dom = get_interactive_dom(simplified_dom)
+            
             # simplified_dom = BeautifulSoup(simplified_dom, 'html.parser').prettify()
         except Exception as e:
-            logger.exception(f"Error getting simplified DOM: {e}. Trying another method to get DOM.")
+            logger.exception(f"Error getting input DOM: {e}. Trying another method to get DOM.")
             # simplified_dom = await active_page.content()
             simplified_dom = await get_full_dom_with_shadow(active_page)
-            simplified_dom = get_simplified_dom(simplified_dom, current_url)
+            input_elements = keep_only_input_tags(simplified_dom)
+            # simplified_dom = get_simplified_dom(simplified_dom, current_url)
         step_logs.append(f"DOM updated for the current url: {current_url}")
     else:
         simplified_dom = None
-    return current_url, current_url_valid, simplified_dom
+        input_elements = None
+    return current_url, current_url_valid, input_elements
 
 
 async def execute_step(client, current_step_id, current_step_goal, active_page, browser, verifier_message=None):
@@ -373,7 +408,7 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
         verifier_message: The message from the verifier agent
     
     Returns:
-        A tuple containing (success, active_page, final_text, step_logs, simplified_dom)
+        A tuple containing (success, active_page, final_text, step_logs)
     """
     max_retries = config.MAX_RETRIES
     max_consecutive_tool_calls = config.MAX_CONSECUTIVE_TOOL_CALLS
@@ -392,7 +427,7 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
     # Get initial DOM and URL
     current_url = active_page.url
     current_url_valid = validators.url(current_url)
-    simplified_dom = None
+    input_elements = None
     page_screenshot = None
     
     # Executor loop
@@ -402,7 +437,7 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
         
         # Update DOM if URL has changed
         if active_page.url != current_url or current_iter == 1:
-            current_url, current_url_valid, simplified_dom = await get_current_page_state(active_page, step_logs)
+            current_url, current_url_valid, input_elements = await get_current_page_state(active_page, step_logs)
         
         page_screenshot = await get_page_screenshot(active_page, full_page=False)
         
@@ -411,7 +446,7 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
             step_logs.append(f"Attempt {retry_count+1}, current_url: {current_url}\n")
             logger.info(f"Attempt {retry_count+1}, current_url: {current_url}\n")
         
-        logger.info(f"'goal' {current_step_goal}, 'current_url', {current_url}, 'simplified_dom is None?' {simplified_dom is None}")
+        logger.info(f"'goal' {current_step_goal}, 'current_url', {current_url}")
         
         # Trim chat history for efficiency
         executor_chat_history = executor_chat.get_history()
@@ -427,8 +462,8 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
         # Construct and send prompt to LLM
         executor_prompt = create_step_prompt(
             current_step_goal, 
-            current_url, 
-            simplified_dom, 
+            current_url,
+            input_elements,
             function_response_parts, 
             step_logs, 
             action_failure,
@@ -442,11 +477,12 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
             step_logs.append(f"Called Step Executor model. Response text: {response.text}")
         except Exception as e:
             logger.exception(f"Error calling executor model: {e}")
-            return False, active_page, f"Error: {e}", step_logs, simplified_dom
+            return False, active_page, f"Error: {e}", step_logs
         
         # Check if this is a final response (no function calls)
         if not response.function_calls or len(response.function_calls) == 0:
             final_text = response.text
+            print(response.text)
             logger.info(f"Step Executor provided final text for Step {current_step_id}: {final_text}")
             step_logs.append(f"Step Executor provided final text for Step {current_step_id}: {final_text}")
             
@@ -478,21 +514,22 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
             
             # Execute the requested function
             function_result = None
+            function_result_redacted = None
             
             try:
                 if function_name == "goto_url":
                     await goto_url(url=args["url"], active_page=active_page)
-                    logger.info(f"URL updated to: {active_page.url}")
-                    step_logs.append(f"URL updated to: {active_page.url}")
-                    function_result = "Action completed successfully"
+                    # logger.info(f"URL updated to: {active_page.url}")
+                    # step_logs.append(f"URL updated to: {active_page.url}")
+                    function_result = f"URL updated to: {active_page.url}"
                     await asyncio.sleep(1)
                 
                 elif function_name == "open_new_page":
                     new_page = await open_new_page(url=args["url"], browser=browser)
                     active_page = new_page
-                    function_result = "Action completed successfully"
-                    logger.info(f"Switched active page to: {active_page.url}")
-                    step_logs.append(f"Switched active page to: {active_page.url}")
+                    function_result = f"Switched active page to: {active_page.url}"
+                    # logger.info(f"Switched active page to: {active_page.url}")
+                    # step_logs.append(f"Switched active page to: {active_page.url}")
                     await asyncio.sleep(1)
                 
                 elif function_name == "perform_locator_action":
@@ -503,9 +540,9 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
                         args_dict=args["args_dict"],
                         active_page=active_page
                     )
-                    logger.info(f"Completed locator action: {function_result})")
-                    step_logs.append(f"Completed locator action: {function_result})")
-                    function_result = "Action completed successfully"
+                    # logger.info(f"Completed locator action: {function_result})")
+                    # step_logs.append(f"Completed locator action: {function_result})")
+                    function_result = f"Completed locator action successfully"
                     await asyncio.sleep(1)
                 
                 elif function_name == "perform_page_action":
@@ -514,32 +551,40 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
                         args_dict=args["args_dict"],
                         active_page=active_page
                     )
-                    logger.info(f"Completed page action: {function_result})")
-                    step_logs.append(f"Completed page action: {function_result})")
-                    function_result = "Action completed successfully"
+                    # logger.info(f"Completed page action: {function_result})")
+                    # step_logs.append(f"Completed page action: {function_result})")
+                    function_result = "Completed page action successfully"
                     await asyncio.sleep(1)
                 
                 elif function_name == "get_user_input":
                     function_result = get_user_input(query=args["query"])
-                    logger.info(f"Completed get_user_input: {function_result})")
-                    step_logs.append(f"Completed get_user_input: {function_result})")
+                    if "password" in args["query"].lower() and not function_result == "q":
+                        function_result_redacted = "<password entered>"
+                    # logger.info(f"Completed get_user_input: {function_result_redacted})")
+                    # step_logs.append(f"Completed get_user_input: {function_result_redacted})")
                     if function_result == "q":
                         logger.info(f"User aborted the program")
                         step_logs.append(f"User aborted the program)")
-                        return False, active_page, f"User Aborted the program", step_logs, simplified_dom
+                        return False, active_page, f"User Aborted the program", step_logs
 
                 elif function_name == "save_data":
                     save_data(data=args["data"], filename=args.get("filename", None))
-                    function_result = "Action completed successfully"
-                    logger.info(f"Completed save_data: {function_result})")
-                    step_logs.append(f"Completed save_data: {function_result})")
+                    function_result = "data saved successfully"
+                    # logger.info(f"Completed save_data: {function_result})")
+                    # step_logs.append(f"Completed save_data: {function_result})")
 
                 elif function_name == "display_data":
                     display_data(data=args["data"])
-                    function_result = "Action completed successfully"
-                    logger.info(f"Displaying data to user: {args['data']}")
-                    logger.info(f"Completed display_data: {function_result})")
-                    step_logs.append(f"Completed display_data: {function_result})")
+                    function_result = "data displayed to the user"
+                    # logger.info(f"Displaying data to user: {args['data']}")
+                    # logger.info(f"Completed display_data: {function_result})")
+                    # step_logs.append(f"Completed display_data: {function_result})")
+
+                elif function_name == "get_full_dom":
+                    full_dom = await get_full_dom(reason=args["reason"], active_page=active_page)
+                    function_result = full_dom
+                    # logger.info(f"Succesfully fetched the DOM: {len(full_dom)} chars")
+                    # step_logs.append(f"Succesfully fetched the DOM: {len(full_dom)} chars")
 
                 else:
                     logger.error(f"Unknown function call requested: {function_name}")
@@ -551,12 +596,12 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
                 logger.exception(f"Error executing {function_name}: {e}")
                 action_failure = True
             
-            # Create function response part
-            if function_result is None:
-                function_result = "Action completed successfully"
-            
-            logger.info(f"Function Result: {function_result}")
-            step_logs.append(f"Function Result: {function_result}")
+            if function_result_redacted is not None:
+                logger.info(f"Function Result: {function_result_redacted if len(function_result_redacted) < 100 else function_result_redacted[:100] + ' ...... '}")
+                step_logs.append(f"Function Result: {function_result_redacted if len(function_result_redacted) < 100 else function_result_redacted[:100] + ' ...... '}")
+            else:
+                logger.info(f"Function Result: {function_result if len(function_result) < 100 else function_result[:100] + ' ...... '}")
+                step_logs.append(f"Function Result: {function_result}")
             
             function_response_part = types.Part.from_function_response(
                 name=function_call.name,
@@ -580,12 +625,12 @@ async def execute_step(client, current_step_id, current_step_goal, active_page, 
     
 
     if active_page.url != current_url:
-            current_url, current_url_valid, simplified_dom = await get_current_page_state(active_page, step_logs)
+            current_url, current_url_valid, input_elements = await get_current_page_state(active_page, step_logs)
 
     # Final status check
     if not step_completed_successfully:
         logger.warning(f"Step {current_step_id} FAILED after {retry_count} retries or {num_tool_calls} tool calls")
-        return False, active_page, f"Failed to complete step {current_step_id}: {current_step_goal}", step_logs, simplified_dom
+        return False, active_page, f"Failed to complete step {current_step_id}: {current_step_goal}", step_logs
     else:
         logger.info(f"Step {current_step_id}-{current_step_goal} COMPLETED successfully")
-        return True, active_page, final_text, step_logs, simplified_dom
+        return True, active_page, final_text, step_logs

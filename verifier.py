@@ -41,7 +41,7 @@ def create_verifier_chat(client):
     return client.chats.create(model=config.VERIFIER_MODEL, config=verifier_config)
 
 
-async def verify_step_completion(client, step, active_page, step_logs, final_text, current_step_goal, simplified_dom=None):
+async def verify_step_completion(client, step, active_page, step_logs, final_text, current_step_goal):
     """
     Verifies if a step has been completed successfully
     
@@ -64,7 +64,7 @@ async def verify_step_completion(client, step, active_page, step_logs, final_tex
     # Get current page state
     current_url = active_page.url
     current_url_valid = validators.url(current_url)
-    # simplified_dom = None
+    simplified_dom = None
     
     active_page_screenshot = await get_page_screenshot(active_page, full_page=False)
     
@@ -73,7 +73,7 @@ async def verify_step_completion(client, step, active_page, step_logs, final_tex
         if current_url_valid and simplified_dom is None:
             # simplified_dom = await active_page.content()
             simplified_dom = await get_full_dom_with_shadow(active_page)
-            simplified_dom = await get_interactive_dom(simplified_dom)
+            simplified_dom = get_interactive_dom(simplified_dom)
             # simplified_dom = BeautifulSoup(simplified_dom, 'html.parser').prettify()
         else:
             pass
@@ -83,6 +83,10 @@ async def verify_step_completion(client, step, active_page, step_logs, final_tex
     except Exception as e:
         logger.exception(f"Error getting page state for verification: {e}")
         raise e
+    
+    # trim the DOM to fit in token limit of model
+    max_dom_size = (config.RATE_LIMITS[config.VERIFIER_MODEL] - 2000 ) * 3  # 2000 tokens less than max tokens per minute(per call). assume atleast 3 chars per token.
+    simplified_dom = simplified_dom[:max_dom_size]
     
     # Prepare verification prompt
     verifier_prompt = f"""
@@ -102,7 +106,7 @@ async def verify_step_completion(client, step, active_page, step_logs, final_tex
 
     Please verify if the Goal has been completed, based on the final text response, step logs, screenshot, dom, and url. See if there are any errors being shown on the page.
 
-    If the goal has been completed, provide a success message.
+    If the goal has been completed, provide a success message, with a brief description of the verification process.
 
     If the goal has not been completed, 
         1. provide a modified goal that should be completed, based on the current state (from screenshot, dom, url, step logs). Ultimately to achieve the goal.

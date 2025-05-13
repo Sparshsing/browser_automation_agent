@@ -20,7 +20,12 @@ warnings.filterwarnings("ignore", module="google.*")
 logfile = "logs/agent.log"
 logger = create_custom_logger(__name__, logfile)
 
+
+# suppress google warnings
 logging.getLogger('google_genai.types').setLevel(logging.ERROR)
+
+# set log level as Warning for Root logger
+logging.basicConfig(level=logging.WARNING)
 
 load_dotenv()
 
@@ -37,6 +42,7 @@ async def interact(user_query: str):
     
     
     # Plan the query into steps
+    print("Making a plan for the query...")
     steps = plan_user_query(client, user_query)
     
     if not steps:
@@ -81,7 +87,7 @@ async def interact(user_query: str):
                     try:
                         success = False
                         final_text = ""
-                        success, active_page, final_text, step_logs, simplified_dom = await execute_step(
+                        success, active_page, final_text, step_logs = await execute_step(
                             client, step.step_id, current_step_goal, active_page, browser, verifier_message=verifier_message
                         )
                         if not success and final_text == f"User Aborted the program":
@@ -95,7 +101,7 @@ async def interact(user_query: str):
                     if success:
                         # Verify step completion
                         verification = await verify_step_completion(
-                            client, step, active_page, step_logs, final_text, current_step_goal=current_step_goal, simplified_dom=simplified_dom
+                            client, step, active_page, step_logs, final_text, current_step_goal=current_step_goal
                         )
                         
                         if verification.success:
@@ -138,7 +144,7 @@ async def interact(user_query: str):
 if __name__ == "__main__":
     # Run the main function
     # Get user query
-    user_query = input("Enter your query for browser automation: ")
-    # user_query = "open bbc.com and login, search for rcb ipl and click the second link. provide a 100 word summary and include any metadata"
+    # user_query = input("Enter your query for browser automation: ")
+    user_query = "open bbc.com and login, search for rcb ipl and click the second link. provide a 100 word summary and include any metadata"
     logger.info(f"User query: {user_query}")
     asyncio.run(interact(user_query)) 

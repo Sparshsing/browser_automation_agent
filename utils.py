@@ -285,7 +285,7 @@ def call_gemini_chat(chat, content, max_retries=2):
             chat_history_json = {}  #get_chat_history_json(chat.get_history())
 
             # Prepare user request JSON
-            user_request_json = get_chat_history_json([types.UserContent(parts=content)])
+            user_request_json =  ([types.UserContent(parts=content).to_json_dict()])
             
             # Send message and get response
             logger.info(f"Sending message to LLM: {user_request_json}")
@@ -299,6 +299,7 @@ def call_gemini_chat(chat, content, max_retries=2):
             prompt_tokens = usage.prompt_token_count
             output_tokens = usage.candidates_token_count
             total_tokens = prompt_tokens + output_tokens
+            logger.info(f"Token usage: {prompt_tokens} prompt, {output_tokens} output, {total_tokens} total")
             
             # ADDED: Update token usage tracking with tokens from this call
             _token_usage[model_name].append((time.time(), total_tokens))

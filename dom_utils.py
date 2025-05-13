@@ -287,3 +287,37 @@ async def get_full_dom_with_shadow(page) -> str:
     """)
     return full_html
 
+
+def keep_only_input_tags(html_string: str) -> str:
+    """
+    Parses an HTML string and returns a new string containing only <input> tags.
+    All attributes of the input tags are preserved.
+
+    Args:
+        html_string: The input HTML DOM string.
+
+    Returns:
+        A string containing only the <input> tags found in the original HTML,
+        each potentially on a new line for readability in the output string.
+        Returns an empty string if no input tags are found or if the input is empty.
+    """
+    if not html_string:
+        return ""
+
+    # You can use 'lxml' for a faster parser if installed,
+    # or 'html.parser' (Python's built-in)
+    try:
+        soup = BeautifulSoup(html_string, 'lxml')
+    except Exception: # Fallback if lxml is not installed or fails
+        soup = BeautifulSoup(html_string, 'html.parser')
+
+    # Find all <input> tags
+    input_tags = soup.find_all('input')
+
+    # Convert each found input tag back to its string representation
+    # and join them. str(tag) gives the HTML string of the tag.
+    input_tag_strings = [str(tag) for tag in input_tags]
+
+    # Join them, optionally with newlines for readability of the output string
+    # The browser will render them correctly either way.
+    return '\n'.join(input_tag_strings)

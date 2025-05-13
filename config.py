@@ -9,13 +9,15 @@ load_dotenv()
 # EXECUTION_MODEL = "gemini-2.0-flash"
 # VERIFIER_MODEL = "gemini-2.0-flash"
 
-PLANNING_MODEL = "gemini-2.5-pro-exp-03-25"#"gemini-2.5-pro-exp-03-25"
+PLANNING_MODEL = "gemini-2.0-flash"#"gemini-2.5-pro-exp-03-25"
 EXECUTION_MODEL = "gemini-2.0-flash"
 VERIFIER_MODEL = "gemini-2.0-flash"
 
 # Model rate Limits - Requests per minute
 RATE_LIMITS = {
     "gemini-2.5-pro-exp-03-25": 5,
+    "gemini-2.5-pro-preview-05-06": 5,
+    "gemini-2.5-flash-preview-04-17": 10,
     "gemini-2.0-flash": 15,
     "gemini-2.0-flash-lite": 15,
     "gemini-2.0-flash-thinking-exp-01-21": 10,
@@ -26,6 +28,8 @@ RATE_LIMITS = {
 # Model Token Limits - Tokens per minute for each model
 TOKEN_LIMITS = {
     "gemini-2.5-pro-exp-03-25": 1000000,
+    "gemini-2.5-pro-preview-05-06": 250000,
+    "gemini-2.5-flash-preview-04-17": 250000,
     "gemini-2.0-flash": 1000000,
     "gemini-2.0-flash-lite": 1000000,
     "gemini-2.0-flash-thinking-exp-01-21": 1000000,
